@@ -396,7 +396,7 @@
             const apiBase = apiFromQuery
                 ? apiFromQuery.replace(/\/+$/, '')
                 : (location.protocol === 'http:' || location.protocol === 'https:')
-                    ? location.origin
+                    ? ''
                     : defaultApiBase;
 
             const formData = new FormData();

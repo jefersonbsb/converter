@@ -33,4 +33,11 @@ async def ui():
     index_path = Path(__file__).resolve().parents[2] / "index.html"
     if not index_path.exists():
         raise HTTPException(500, "index.html não encontrado no servidor.")
-    return FileResponse(path=str(index_path), media_type="text/html")
+    return FileResponse(
+        path=str(index_path),
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
