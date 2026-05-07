@@ -1,12 +1,22 @@
 import zipfile
 import traceback
+import threading
 from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks, Query
 from fastapi.responses import FileResponse
 
-from app.utils import unique_path, cleanup_files, validate_ext
+from app.utils import (
+    unique_path,
+    cleanup_files,
+    validate_ext,
+    create_job,
+    update_job,
+    attach_job_files,
+    complete_job,
+    fail_job,
+)
 
 router = APIRouter(prefix="/convert", tags=["PDF"])
 
@@ -226,6 +236,248 @@ async def convert_pdf_to_word(
         error_detail = f"Conversion failed: {exc}\n{traceback.format_exc()}"
         print(f"[pdf-to-word] ERROR: {error_detail}")
         raise HTTPException(500, detail=f"Conversion failed: {exc}")
+
+
+@router.post("/pdf-to-word-job")
+async def convert_pdf_to_word_job(
+    file: UploadFile = File(...),
+    ocr: bool = Query(False, description="Ativa OCR quando o PDF não possui texto extraível"),
+    ocr_lang: str = Query("por", description="Idioma do OCR (ex.: por, eng, por+eng)"),
+    ocr_dpi: int = Query(200, description="Resolução (DPI) usada para OCR"),
+):
+    validate_ext(file.filename, {".pdf"})
+    input_path = unique_path(".pdf")
+    output_path = input_path.with_suffix(".docx")
+
+    content = await file.read()
+    input_path.write_bytes(content)
+
+    job_id = create_job()
+    attach_job_files(job_id, input_path=input_path)
+    update_job(job_id, progress=0, status="running")
+
+    download_name = f"{Path(file.filename).stem}.docx"
+    media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    def progress_cb(pct: int) -> None:
+        update_job(job_id, progress=pct)
+
+    def worker() -> None:
+        try:
+            progress_cb(5)
+
+            def docx_has_meaningful_text(path: Path) -> bool:
+                try:
+                    from docx import Document
+                except Exception:
+                    return False
+
+                try:
+                    doc = Document(str(path))
+                except Exception:
+                    return False
+
+                text_parts: list[str] = []
+
+                for p in doc.paragraphs:
+                    if p.text:
+                        text_parts.append(p.text)
+
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text:
+                                text_parts.append(cell.text)
+
+                combined = "\n".join(text_parts).strip()
+                return len(combined) > 0
+
+            def build_docx_from_pdf_text(pdf_path: Path, docx_path: Path) -> None:
+                import fitz
+                from docx import Document
+
+                pdf = fitz.open(str(pdf_path))
+                doc = Document()
+                total_pages = len(pdf) or 1
+
+                for i in range(len(pdf)):
+                    page = pdf[i]
+                    words = page.get_text("words") or []
+                    lines: dict[tuple[int, int], dict] = {}
+                    for w in words:
+                        x0, y0, x1, y1, text, block_no, line_no, word_no = w
+                        text = (text or "").strip()
+                        if not text:
+                            continue
+                        key = (int(block_no), int(line_no))
+                        item = lines.get(key)
+                        if not item:
+                            item = {"y0": float(y0), "x0": float(x0), "parts": []}
+                            lines[key] = item
+                        else:
+                            if float(y0) < item["y0"]:
+                                item["y0"] = float(y0)
+                            if float(x0) < item["x0"]:
+                                item["x0"] = float(x0)
+                        item["parts"].append((float(x0), text))
+
+                    ordered = sorted(
+                        lines.values(),
+                        key=lambda it: (it["y0"], it["x0"]),
+                    )
+
+                    rendered_lines: list[str] = []
+                    for it in ordered:
+                        parts = sorted(it["parts"], key=lambda p: p[0])
+                        line_text = " ".join(t for _, t in parts).strip()
+                        if line_text:
+                            rendered_lines.append(line_text)
+
+                    normalized_lines: list[str] = []
+                    for line_text in rendered_lines:
+                        if (
+                            normalized_lines
+                            and normalized_lines[-1].endswith("-")
+                            and line_text[:1].islower()
+                        ):
+                            normalized_lines[-1] = normalized_lines[-1][:-1] + line_text
+                        else:
+                            normalized_lines.append(line_text)
+
+                    for line_text in normalized_lines:
+                        if line_text:
+                            doc.add_paragraph(line_text)
+                    if i < len(pdf) - 1:
+                        doc.add_page_break()
+
+                    progress_cb(20 + int(((i + 1) / total_pages) * 70))
+
+                pdf.close()
+                doc.save(str(docx_path))
+
+            def build_docx_from_pdf_ocr(pdf_path: Path, docx_path: Path) -> None:
+                try:
+                    import pytesseract
+                except Exception as exc:
+                    raise HTTPException(
+                        500,
+                        f"OCR não está disponível no servidor (pytesseract). Erro: {exc}",
+                    )
+
+                try:
+                    import fitz
+                except Exception as exc:
+                    raise HTTPException(500, f"Falha ao carregar PyMuPDF para OCR: {exc}")
+
+                try:
+                    from PIL import Image
+                except Exception as exc:
+                    raise HTTPException(500, f"Falha ao carregar Pillow para OCR: {exc}")
+
+                from docx import Document
+
+                pdf = fitz.open(str(pdf_path))
+                doc = Document()
+                total_pages = len(pdf) or 1
+                scale = max(1.0, ocr_dpi / 72)
+                matrix = fitz.Matrix(scale, scale)
+
+                for i in range(len(pdf)):
+                    page = pdf[i]
+                    pix = page.get_pixmap(matrix=matrix, alpha=False)
+                    if pix.n == 1:
+                        mode = "L"
+                    elif pix.n == 3:
+                        mode = "RGB"
+                    elif pix.n == 4:
+                        mode = "RGBA"
+                    else:
+                        mode = "RGB"
+
+                    img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+
+                    text = (pytesseract.image_to_string(img, lang=ocr_lang) or "").strip()
+                    if text:
+                        for line in text.splitlines():
+                            line = line.strip()
+                            if line:
+                                doc.add_paragraph(line)
+                    if i < len(pdf) - 1:
+                        doc.add_page_break()
+
+                    progress_cb(20 + int(((i + 1) / total_pages) * 70))
+
+                pdf.close()
+                doc.save(str(docx_path))
+
+            pdf2docx_error: Exception | None = None
+            try:
+                from pdf2docx import Converter as PdfToDocxConverter
+
+                progress_cb(10)
+                cv = PdfToDocxConverter(str(input_path))
+                cv.convert(str(output_path), start=0, end=None)
+                cv.close()
+                progress_cb(20)
+            except Exception as err:
+                pdf2docx_error = err
+                progress_cb(20)
+
+            if output_path.exists() and not docx_has_meaningful_text(output_path):
+                cleanup_files(output_path)
+
+            if (not output_path.exists()) or (not docx_has_meaningful_text(output_path)):
+                try:
+                    build_docx_from_pdf_text(input_path, output_path)
+                except Exception:
+                    cleanup_files(output_path)
+
+            if output_path.exists() and not docx_has_meaningful_text(output_path) and ocr:
+                cleanup_files(output_path)
+                build_docx_from_pdf_ocr(input_path, output_path)
+
+            if output_path.exists() and not docx_has_meaningful_text(output_path):
+                cleanup_files(output_path)
+                if pdf2docx_error:
+                    raise HTTPException(
+                        422,
+                        "PDF parece ser escaneado ou não possui texto extraível; use o parâmetro ocr=true para tentar OCR.",
+                    )
+                raise HTTPException(
+                    422,
+                    "PDF não possui texto extraível; use o parâmetro ocr=true para tentar OCR.",
+                )
+
+            if not output_path.exists():
+                for f in input_path.parent.iterdir():
+                    if (
+                        f.stem.startswith(input_path.stem.split("_")[0])
+                        and f.suffix == ".docx"
+                    ):
+                        output_path = f
+                        break
+                else:
+                    raise HTTPException(500, "DOCX output not found after conversion.")
+
+            complete_job(
+                job_id,
+                output_path=output_path,
+                download_name=download_name,
+                media_type=media_type,
+            )
+        except Exception as exc:
+            fail_job(job_id, message=str(exc))
+            cleanup_files(input_path, output_path)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    return {
+        "job_id": job_id,
+        "status_url": f"/jobs/{job_id}",
+        "download_url": f"/jobs/{job_id}/download",
+    }
 
 
 # ── PDF → Image ───────────────────────────────────────────────────────────

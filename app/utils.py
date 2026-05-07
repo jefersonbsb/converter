@@ -3,6 +3,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -136,3 +138,111 @@ def libre_convert(input_path: Path, output_ext: str, timeout: int = 120) -> Path
             raise HTTPException(500, "Output file not found after conversion.")
 
     return output_path
+
+
+_JOB_LOCK = threading.Lock()
+_JOBS: dict[str, dict] = {}
+
+
+def _cleanup_old_jobs(max_age_seconds: int = 3600) -> None:
+    now = time.time()
+    with _JOB_LOCK:
+        expired = [
+            job_id
+            for job_id, job in _JOBS.items()
+            if now - float(job.get("created_at", now)) > max_age_seconds
+        ]
+        for job_id in expired:
+            job = _JOBS.pop(job_id, None)
+            if job:
+                in_path = job.get("input_path")
+                out_path = job.get("output_path")
+                if isinstance(in_path, Path):
+                    cleanup_files(in_path)
+                if isinstance(out_path, Path):
+                    cleanup_files(out_path)
+
+
+def create_job() -> str:
+    _cleanup_old_jobs()
+    job_id = uuid.uuid4().hex
+    with _JOB_LOCK:
+        _JOBS[job_id] = {
+            "status": "running",
+            "progress": 0,
+            "message": "",
+            "created_at": time.time(),
+            "input_path": None,
+            "output_path": None,
+            "download_name": None,
+            "media_type": None,
+        }
+    return job_id
+
+
+def update_job(
+    job_id: str,
+    *,
+    progress: int | None = None,
+    status: str | None = None,
+    message: str | None = None,
+) -> None:
+    with _JOB_LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            return
+        if progress is not None:
+            job["progress"] = max(0, min(100, int(progress)))
+        if status is not None:
+            job["status"] = status
+        if message is not None:
+            job["message"] = message
+
+
+def attach_job_files(job_id: str, *, input_path: Path | None = None) -> None:
+    with _JOB_LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            return
+        if input_path is not None:
+            job["input_path"] = input_path
+
+
+def complete_job(
+    job_id: str,
+    *,
+    output_path: Path,
+    download_name: str,
+    media_type: str,
+) -> None:
+    with _JOB_LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            return
+        job["status"] = "done"
+        job["progress"] = 100
+        job["output_path"] = output_path
+        job["download_name"] = download_name
+        job["media_type"] = media_type
+
+
+def fail_job(job_id: str, *, message: str) -> None:
+    with _JOB_LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            return
+        job["status"] = "error"
+        job["message"] = message
+
+
+def get_job(job_id: str) -> dict | None:
+    _cleanup_old_jobs()
+    with _JOB_LOCK:
+        job = _JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def pop_job(job_id: str) -> dict | None:
+    with _JOB_LOCK:
+        job = _JOBS.pop(job_id, None)
+        return dict(job) if job else None
