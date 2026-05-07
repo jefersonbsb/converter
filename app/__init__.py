@@ -8,7 +8,7 @@ from app.routes import office, pdf, image, ebook, root
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="File Converter API", version="2.0.0")
+    app = FastAPI(title="File Converter API", version="2.0.0", docs_url=None, redoc_url=None)
 
     app.add_middleware(
         CORSMiddleware,
