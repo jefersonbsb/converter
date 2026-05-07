@@ -395,7 +395,7 @@
             const apiFromQuery = new URLSearchParams(location.search).get('api');
             const apiBase = apiFromQuery
                 ? apiFromQuery.replace(/\/+$/, '')
-                : ((location.protocol === 'http:' || location.protocol === 'https:') && location.port === '3004')
+                : (location.protocol === 'http:' || location.protocol === 'https:')
                     ? location.origin
                     : defaultApiBase;
 
