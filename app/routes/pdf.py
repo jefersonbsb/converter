@@ -241,9 +241,12 @@ async def convert_pdf_to_word(
 @router.post("/pdf-to-word-job")
 async def convert_pdf_to_word_job(
     file: UploadFile = File(...),
+    engine: str = Query("auto", description="auto, pdf2docx, text, ocr"),
     ocr: bool = Query(False, description="Ativa OCR quando o PDF não possui texto extraível"),
     ocr_lang: str = Query("por", description="Idioma do OCR (ex.: por, eng, por+eng)"),
     ocr_dpi: int = Query(200, description="Resolução (DPI) usada para OCR"),
+    start_page: int = Query(1, ge=1, description="Página inicial (1-based)"),
+    end_page: int | None = Query(None, ge=1, description="Página final (1-based, inclusiva)"),
 ):
     validate_ext(file.filename, {".pdf"})
     input_path = unique_path(".pdf")
@@ -263,8 +266,37 @@ async def convert_pdf_to_word_job(
 
     def worker() -> None:
         out_path = output_path
+        progress_stop = threading.Event()
         try:
             progress_cb(5)
+            update_job(job_id, message="Analisando PDF…")
+
+            import fitz
+
+            pdf = fitz.open(str(input_path))
+            total_pages = len(pdf) or 1
+            pdf.close()
+
+            sp = int(start_page)
+            ep = int(end_page) if end_page is not None else int(total_pages)
+            if sp < 1 or ep < 1 or sp > ep:
+                raise HTTPException(400, "Intervalo de páginas inválido.")
+            if sp > total_pages:
+                raise HTTPException(400, f"start_page fora do limite. Total: {total_pages}.")
+            if ep > total_pages:
+                ep = int(total_pages)
+
+            selected_pages = int(ep - sp + 1)
+
+            eng = (engine or "auto").strip().lower()
+            if eng not in ("auto", "pdf2docx", "text", "ocr"):
+                raise HTTPException(400, "engine inválido. Use: auto, pdf2docx, text, ocr.")
+
+            if eng == "auto":
+                eng = "text" if selected_pages > 120 else "pdf2docx"
+
+            if eng == "ocr":
+                ocr = True
 
             def docx_has_meaningful_text(path: Path) -> bool:
                 try:
@@ -298,10 +330,10 @@ async def convert_pdf_to_word_job(
 
                 pdf = fitz.open(str(pdf_path))
                 doc = Document()
-                total_pages = len(pdf) or 1
+                total = max(1, selected_pages)
 
-                for i in range(len(pdf)):
-                    page = pdf[i]
+                for idx, page_i in enumerate(range(sp - 1, ep)):
+                    page = pdf[page_i]
                     words = page.get_text("words") or []
                     lines: dict[tuple[int, int], dict] = {}
                     for w in words:
@@ -347,10 +379,10 @@ async def convert_pdf_to_word_job(
                     for line_text in normalized_lines:
                         if line_text:
                             doc.add_paragraph(line_text)
-                    if i < len(pdf) - 1:
+                    if page_i < ep - 1:
                         doc.add_page_break()
 
-                    progress_cb(20 + int(((i + 1) / total_pages) * 70))
+                    progress_cb(35 + int(((idx + 1) / total) * 60))
 
                 pdf.close()
                 doc.save(str(docx_path))
@@ -378,12 +410,12 @@ async def convert_pdf_to_word_job(
 
                 pdf = fitz.open(str(pdf_path))
                 doc = Document()
-                total_pages = len(pdf) or 1
+                total = max(1, selected_pages)
                 scale = max(1.0, ocr_dpi / 72)
                 matrix = fitz.Matrix(scale, scale)
 
-                for i in range(len(pdf)):
-                    page = pdf[i]
+                for idx, page_i in enumerate(range(sp - 1, ep)):
+                    page = pdf[page_i]
                     pix = page.get_pixmap(matrix=matrix, alpha=False)
                     if pix.n == 1:
                         mode = "L"
@@ -404,38 +436,56 @@ async def convert_pdf_to_word_job(
                             line = line.strip()
                             if line:
                                 doc.add_paragraph(line)
-                    if i < len(pdf) - 1:
+                    if page_i < ep - 1:
                         doc.add_page_break()
 
-                    progress_cb(20 + int(((i + 1) / total_pages) * 70))
+                    progress_cb(35 + int(((idx + 1) / total) * 60))
 
                 pdf.close()
                 doc.save(str(docx_path))
 
             pdf2docx_error: Exception | None = None
-            try:
-                from pdf2docx import Converter as PdfToDocxConverter
+            if eng == "pdf2docx":
+                update_job(job_id, message="Convertendo (pdf2docx)…")
 
-                progress_cb(10)
-                cv = PdfToDocxConverter(str(input_path))
-                cv.convert(str(out_path), start=0, end=None)
-                cv.close()
-                progress_cb(20)
-            except Exception as err:
-                pdf2docx_error = err
-                progress_cb(20)
+                def tick_progress() -> None:
+                    p = 10
+                    while not progress_stop.is_set():
+                        p = min(34, p + 1)
+                        update_job(job_id, progress=p)
+                        progress_stop.wait(2.0)
+
+                threading.Thread(target=tick_progress, daemon=True).start()
+
+                try:
+                    from pdf2docx import Converter as PdfToDocxConverter
+
+                    progress_cb(10)
+                    cv = PdfToDocxConverter(str(input_path))
+                    cv.convert(str(out_path), start=sp - 1, end=ep - 1)
+                    cv.close()
+                    progress_cb(35)
+                except Exception as err:
+                    pdf2docx_error = err
+                    cleanup_files(out_path)
+                finally:
+                    progress_stop.set()
+            else:
+                progress_cb(35)
 
             if out_path.exists() and not docx_has_meaningful_text(out_path):
                 cleanup_files(out_path)
 
             if (not out_path.exists()) or (not docx_has_meaningful_text(out_path)):
                 try:
+                    update_job(job_id, message="Extraindo texto…")
                     build_docx_from_pdf_text(input_path, out_path)
                 except Exception:
                     cleanup_files(out_path)
 
             if out_path.exists() and not docx_has_meaningful_text(out_path) and ocr:
                 cleanup_files(out_path)
+                update_job(job_id, message="Executando OCR…")
                 build_docx_from_pdf_ocr(input_path, out_path)
 
             if out_path.exists() and not docx_has_meaningful_text(out_path):
@@ -461,6 +511,7 @@ async def convert_pdf_to_word_job(
                 else:
                     raise HTTPException(500, "DOCX output not found after conversion.")
 
+            update_job(job_id, message="Finalizando…")
             complete_job(
                 job_id,
                 output_path=out_path,
@@ -468,6 +519,7 @@ async def convert_pdf_to_word_job(
                 media_type=media_type,
             )
         except Exception as exc:
+            progress_stop.set()
             fail_job(job_id, message=str(exc))
             cleanup_files(input_path, out_path)
 

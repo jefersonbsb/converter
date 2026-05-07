@@ -121,6 +121,7 @@
                     <span>Progresso</span>
                     <span id="progressText">0%</span>
                 </div>
+                <div id="progressMsg" class="text-xs text-gray-500 mb-1"></div>
                 <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
                     <div id="progressBar" class="h-2 bg-indigo-600" style="width: 0%"></div>
                 </div>
@@ -254,6 +255,7 @@
         const ocrLangInput = document.getElementById('ocrLangInput');
         const progressWrap = document.getElementById('progressWrap');
         const progressText = document.getElementById('progressText');
+        const progressMsg = document.getElementById('progressMsg');
         const progressBar = document.getElementById('progressBar');
 
         // ── Populate conversion types based on category ────────────────
@@ -445,6 +447,7 @@
                         }
                         const data = await st.json();
                         setProgress(Number(data.progress || 0));
+                        setProgressMessage(data.message || '');
                         if (data.status === 'done') break;
                         if (data.status === 'error') throw new Error(data.message || 'Falha na conversão.');
                         await sleep(500);
@@ -557,6 +560,10 @@
             const val = Math.max(0, Math.min(100, Number(pct) || 0));
             progressText.textContent = `${val}%`;
             progressBar.style.width = `${val}%`;
+        }
+
+        function setProgressMessage(msg) {
+            progressMsg.textContent = msg || '';
         }
 
         function sleep(ms) {
