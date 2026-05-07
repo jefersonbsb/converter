@@ -66,6 +66,15 @@ const conversions = {
         endpoint: '/convert/pdf-to-image',
         extra: 'pdf-to-image',
     },
+    'merge-pdfs': {
+        category: 'pdf-tools',
+        label: 'Juntar PDFs (Merge)',
+        accept: '.pdf',
+        hint: 'PDF (selecione 2+ arquivos)',
+        endpoint: '/convert/merge-pdfs',
+        extra: 'pdf-merge',
+        multiple: true,
+    },
     'image-to-pdf': {
         category: 'pdf',
         label: 'Imagem → PDF',
@@ -158,6 +167,7 @@ function updateFileAccept() {
     const def = conversions[key];
     if (def) {
         fileInput.accept = def.accept;
+        fileInput.multiple = Boolean(def.multiple);
         fileExtHint.textContent = `Formatos aceitos: ${def.hint}`;
     }
     // Reset file display
@@ -211,6 +221,8 @@ function updateExtraOptions() {
         if (ocrEnabled) {
             dpiInput.value = dpiInput.value || '200';
         }
+    } else if (def && def.extra === 'pdf-merge') {
+        extraOptions.classList.add('hidden');
     } else {
         extraOptions.classList.add('hidden');
     }
@@ -229,9 +241,13 @@ pdfEngineSelect.addEventListener('change', updateExtraOptions);
 
 // ── File name display ───────────────────────────────────────────
 fileInput.addEventListener('change', () => {
-    const f = fileInput.files[0];
-    if (f) {
-        fileName.textContent = f.name;
+    const files = Array.from(fileInput.files || []);
+    if (files.length === 1) {
+        fileName.textContent = files[0].name;
+        fileName.classList.remove('hidden');
+        fileLabel.classList.add('hidden');
+    } else if (files.length > 1) {
+        fileName.textContent = `${files.length} arquivos selecionados`;
         fileName.classList.remove('hidden');
         fileLabel.classList.add('hidden');
     } else {
@@ -256,8 +272,16 @@ fileInput.addEventListener('change', () => {
 dropZone.addEventListener('drop', (e) => {
     const files = e.dataTransfer.files;
     if (files.length) {
-        fileInput.files = files;
-        fileName.textContent = files[0].name;
+        if (fileInput.multiple) {
+            fileInput.files = files;
+        } else {
+            const dt = new DataTransfer();
+            dt.items.add(files[0]);
+            fileInput.files = dt.files;
+        }
+        fileName.textContent = (fileInput.files.length === 1)
+            ? fileInput.files[0].name
+            : `${fileInput.files.length} arquivos selecionados`;
         fileName.classList.remove('hidden');
         fileLabel.classList.add('hidden');
     }
@@ -267,8 +291,8 @@ dropZone.addEventListener('drop', (e) => {
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
 
-    const file = fileInput.files[0];
-    if (!file) {
+    const selectedFiles = Array.from(fileInput.files || []);
+    if (selectedFiles.length === 0) {
         showStatus('Selecione um arquivo antes de converter.', 'red');
         return;
     }
@@ -323,7 +347,13 @@ form.addEventListener('submit', async (e) => {
             : defaultApiBase;
 
     const formData = new FormData();
-    formData.append('file', file);
+    if (def.extra === 'pdf-merge') {
+        for (const f of selectedFiles) {
+            formData.append('files', f);
+        }
+    } else {
+        formData.append('file', selectedFiles[0]);
+    }
 
     try {
         if (def.extra === 'pdf-to-word' || def.extra === 'pdf-to-word-large') {
@@ -371,7 +401,7 @@ form.addEventListener('submit', async (e) => {
             }
 
             const blob = await res.blob();
-            downloadBlob(blob, file.name, res.headers.get('Content-Disposition') || '');
+            downloadBlob(blob, selectedFiles[0].name, res.headers.get('Content-Disposition') || '');
             showStatus('✅ Conversão concluída! Download iniciado.', 'green');
             return;
         }
@@ -432,7 +462,7 @@ form.addEventListener('submit', async (e) => {
                 .trim() || 'converted';
 
         const extFromMime = mimeToExt[blob.type] || (blob.type.startsWith('image/') ? blob.type.split('/')[1] : '');
-        const defaultFilename = `${safeBaseName(file.name)}.${extFromMime || 'file'}`;
+        const defaultFilename = `${safeBaseName(selectedFiles[0].name)}.${extFromMime || 'file'}`;
         const filename = serverFilename || defaultFilename;
 
         const a = document.createElement('a');

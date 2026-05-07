@@ -532,6 +532,51 @@ async def convert_pdf_to_word_job(
     }
 
 
+# ── PDF Merge ──────────────────────────────────────────────────────────────
+
+
+@router.post("/merge-pdfs")
+async def merge_pdfs(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+):
+    if len(files) < 2:
+        raise HTTPException(400, detail="Envie pelo menos 2 arquivos PDF para juntar.")
+
+    input_paths: List[Path] = []
+    output_path = unique_path(".pdf")
+    try:
+        for f in files:
+            validate_ext(f.filename, {".pdf"})
+            p = unique_path(".pdf")
+            await save_upload_file(f, p)
+            input_paths.append(p)
+
+        import fitz
+
+        out_doc = fitz.open()
+        for p in input_paths:
+            doc = fitz.open(str(p))
+            out_doc.insert_pdf(doc)
+            doc.close()
+
+        out_doc.save(str(output_path))
+        out_doc.close()
+
+        background_tasks.add_task(cleanup_files, *input_paths, output_path)
+        return FileResponse(
+            path=str(output_path),
+            media_type="application/pdf",
+            filename="merged.pdf",
+        )
+    except HTTPException:
+        cleanup_files(*input_paths, output_path)
+        raise
+    except Exception as exc:
+        cleanup_files(*input_paths, output_path)
+        raise HTTPException(500, detail=f"Conversion failed: {exc}")
+
+
 # ── PDF → Image ───────────────────────────────────────────────────────────
 
 
