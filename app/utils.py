@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 
 
 TEMP_DIR = Path(tempfile.gettempdir()) / "file-converter-api"
@@ -38,6 +38,16 @@ def validate_ext(filename: str | None, allowed: set) -> str:
         alts = ", ".join(sorted(allowed))
         raise HTTPException(400, f"Only {alts} files are accepted. Got '{ext}'.")
     return ext
+
+
+async def save_upload_file(upload_file: UploadFile, destination: Path, chunk_size: int = 1024 * 1024) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as out:
+        while True:
+            chunk = await upload_file.read(chunk_size)
+            if not chunk:
+                break
+            out.write(chunk)
 
 
 def _resolve_libreoffice_executable() -> str:

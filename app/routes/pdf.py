@@ -11,6 +11,7 @@ from app.utils import (
     unique_path,
     cleanup_files,
     validate_ext,
+    save_upload_file,
     create_job,
     update_job,
     attach_job_files,
@@ -35,8 +36,7 @@ async def convert_pdf_to_word(
     input_path = unique_path(".pdf")
     output_path = input_path.with_suffix(".docx")
     try:
-        content = await file.read()
-        input_path.write_bytes(content)
+        await save_upload_file(file, input_path)
 
         def docx_has_meaningful_text(path: Path) -> bool:
             try:
@@ -249,8 +249,7 @@ async def convert_pdf_to_word_job(
     input_path = unique_path(".pdf")
     output_path = input_path.with_suffix(".docx")
 
-    content = await file.read()
-    input_path.write_bytes(content)
+    await save_upload_file(file, input_path)
 
     job_id = create_job()
     attach_job_files(job_id, input_path=input_path)
@@ -498,8 +497,7 @@ async def convert_pdf_to_image(
     input_path = unique_path(".pdf")
 
     try:
-        content = await file.read()
-        input_path.write_bytes(content)
+        await save_upload_file(file, input_path)
 
         import fitz  # PyMuPDF
         doc = fitz.open(input_path)
@@ -561,8 +559,7 @@ async def convert_image_to_pdf(
     input_path = unique_path(ext)
     output_path = input_path.with_suffix(".pdf")
     try:
-        content = await file.read()
-        input_path.write_bytes(content)
+        await save_upload_file(file, input_path)
 
         image = Image.open(input_path)
         if image.mode in ("RGBA", "P"):

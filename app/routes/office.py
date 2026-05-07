@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 
-from app.utils import unique_path, cleanup_files, validate_ext, libre_convert
+from app.utils import unique_path, cleanup_files, validate_ext, libre_convert, save_upload_file
 
 router = APIRouter(prefix="/convert", tags=["Office"])
 
@@ -21,8 +21,7 @@ async def convert_office_to_pdf(
     ext = validate_ext(file.filename, OFFICE_EXTENSIONS)
     input_path = unique_path(ext)
     try:
-        content = await file.read()
-        input_path.write_bytes(content)
+        await save_upload_file(file, input_path)
         output_path = libre_convert(input_path, ".pdf")
         background_tasks.add_task(cleanup_files, input_path, output_path)
         return _pdf_response(file.filename, output_path)
@@ -49,8 +48,7 @@ async def convert_word_to_html(
     ext = validate_ext(file.filename, WORD_EXTENSIONS)
     input_path = unique_path(ext)
     try:
-        content = await file.read()
-        input_path.write_bytes(content)
+        await save_upload_file(file, input_path)
         output_path = libre_convert(input_path, ".html")
         background_tasks.add_task(cleanup_files, input_path, output_path)
         return FileResponse(
@@ -73,8 +71,7 @@ async def convert_excel_to_csv(
     ext = validate_ext(file.filename, EXCEL_EXTENSIONS)
     input_path = unique_path(ext)
     try:
-        content = await file.read()
-        input_path.write_bytes(content)
+        await save_upload_file(file, input_path)
         output_path = libre_convert(input_path, ".csv")
         background_tasks.add_task(cleanup_files, input_path, output_path)
         return FileResponse(
@@ -97,8 +94,7 @@ async def convert_powerpoint_to_pdf(
     ext = validate_ext(file.filename, PPT_EXTENSIONS)
     input_path = unique_path(ext)
     try:
-        content = await file.read()
-        input_path.write_bytes(content)
+        await save_upload_file(file, input_path)
         output_path = libre_convert(input_path, ".pdf")
         background_tasks.add_task(cleanup_files, input_path, output_path)
         return _pdf_response(file.filename, output_path)

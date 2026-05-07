@@ -4,7 +4,7 @@ from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks,
 from fastapi.responses import FileResponse
 from PIL import Image
 
-from app.utils import unique_path, cleanup_files, validate_ext
+from app.utils import unique_path, cleanup_files, validate_ext, save_upload_file
 
 router = APIRouter(prefix="/convert", tags=["Image"])
 
@@ -47,8 +47,7 @@ async def convert_image_format(
     input_path = unique_path(ext)
     output_path = input_path.with_suffix(target_ext)
     try:
-        content = await file.read()
-        input_path.write_bytes(content)
+        await save_upload_file(file, input_path)
 
         image = Image.open(input_path)
         if image.mode in ("RGBA", "P") and target_ext in (".jpg", ".jpeg"):
