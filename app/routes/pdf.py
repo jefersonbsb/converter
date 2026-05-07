@@ -63,12 +63,51 @@ async def convert_pdf_to_word(
 
             for i in range(len(pdf)):
                 page = pdf[i]
-                page_text = (page.get_text("text") or "").strip()
-                if page_text:
-                    for line in page_text.splitlines():
-                        line = line.strip()
-                        if line:
-                            doc.add_paragraph(line)
+                words = page.get_text("words") or []
+                lines: dict[tuple[int, int], dict] = {}
+                for w in words:
+                    x0, y0, x1, y1, text, block_no, line_no, word_no = w
+                    text = (text or "").strip()
+                    if not text:
+                        continue
+                    key = (int(block_no), int(line_no))
+                    item = lines.get(key)
+                    if not item:
+                        item = {"y0": float(y0), "x0": float(x0), "parts": []}
+                        lines[key] = item
+                    else:
+                        if float(y0) < item["y0"]:
+                            item["y0"] = float(y0)
+                        if float(x0) < item["x0"]:
+                            item["x0"] = float(x0)
+                    item["parts"].append((float(x0), text))
+
+                ordered = sorted(
+                    lines.values(),
+                    key=lambda it: (it["y0"], it["x0"]),
+                )
+
+                rendered_lines: list[str] = []
+                for it in ordered:
+                    parts = sorted(it["parts"], key=lambda p: p[0])
+                    line_text = " ".join(t for _, t in parts).strip()
+                    if line_text:
+                        rendered_lines.append(line_text)
+
+                normalized_lines: list[str] = []
+                for line_text in rendered_lines:
+                    if (
+                        normalized_lines
+                        and normalized_lines[-1].endswith("-")
+                        and line_text[:1].islower()
+                    ):
+                        normalized_lines[-1] = normalized_lines[-1][:-1] + line_text
+                    else:
+                        normalized_lines.append(line_text)
+
+                for line_text in normalized_lines:
+                    if line_text:
+                        doc.add_paragraph(line_text)
                 if i < len(pdf) - 1:
                     doc.add_page_break()
 
