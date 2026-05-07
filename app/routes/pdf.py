@@ -262,6 +262,7 @@ async def convert_pdf_to_word_job(
         update_job(job_id, progress=pct)
 
     def worker() -> None:
+        out_path = output_path
         try:
             progress_cb(5)
 
@@ -417,28 +418,28 @@ async def convert_pdf_to_word_job(
 
                 progress_cb(10)
                 cv = PdfToDocxConverter(str(input_path))
-                cv.convert(str(output_path), start=0, end=None)
+                cv.convert(str(out_path), start=0, end=None)
                 cv.close()
                 progress_cb(20)
             except Exception as err:
                 pdf2docx_error = err
                 progress_cb(20)
 
-            if output_path.exists() and not docx_has_meaningful_text(output_path):
-                cleanup_files(output_path)
+            if out_path.exists() and not docx_has_meaningful_text(out_path):
+                cleanup_files(out_path)
 
-            if (not output_path.exists()) or (not docx_has_meaningful_text(output_path)):
+            if (not out_path.exists()) or (not docx_has_meaningful_text(out_path)):
                 try:
-                    build_docx_from_pdf_text(input_path, output_path)
+                    build_docx_from_pdf_text(input_path, out_path)
                 except Exception:
-                    cleanup_files(output_path)
+                    cleanup_files(out_path)
 
-            if output_path.exists() and not docx_has_meaningful_text(output_path) and ocr:
-                cleanup_files(output_path)
-                build_docx_from_pdf_ocr(input_path, output_path)
+            if out_path.exists() and not docx_has_meaningful_text(out_path) and ocr:
+                cleanup_files(out_path)
+                build_docx_from_pdf_ocr(input_path, out_path)
 
-            if output_path.exists() and not docx_has_meaningful_text(output_path):
-                cleanup_files(output_path)
+            if out_path.exists() and not docx_has_meaningful_text(out_path):
+                cleanup_files(out_path)
                 if pdf2docx_error:
                     raise HTTPException(
                         422,
@@ -449,26 +450,26 @@ async def convert_pdf_to_word_job(
                     "PDF não possui texto extraível; use o parâmetro ocr=true para tentar OCR.",
                 )
 
-            if not output_path.exists():
+            if not out_path.exists():
                 for f in input_path.parent.iterdir():
                     if (
                         f.stem.startswith(input_path.stem.split("_")[0])
                         and f.suffix == ".docx"
                     ):
-                        output_path = f
+                        out_path = f
                         break
                 else:
                     raise HTTPException(500, "DOCX output not found after conversion.")
 
             complete_job(
                 job_id,
-                output_path=output_path,
+                output_path=out_path,
                 download_name=download_name,
                 media_type=media_type,
             )
         except Exception as exc:
             fail_job(job_id, message=str(exc))
-            cleanup_files(input_path, output_path)
+            cleanup_files(input_path, out_path)
 
     threading.Thread(target=worker, daemon=True).start()
 
