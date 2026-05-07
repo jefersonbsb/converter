@@ -462,7 +462,7 @@ async def convert_pdf_to_word_job(
 
                     progress_cb(10)
                     cv = PdfToDocxConverter(str(input_path))
-                    cv.convert(str(out_path), start=sp - 1, end=ep - 1)
+                    cv.convert(str(out_path), start=sp - 1, end=ep)
                     cv.close()
                     progress_cb(35)
                 except Exception as err:
