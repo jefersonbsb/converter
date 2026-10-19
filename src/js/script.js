@@ -51,12 +51,29 @@ const conversions = {
         extra: 'pdf-to-word',
     },
     'pdf-large-to-word': {
-        category: 'pdf-large',
-        label: 'PDF Grande → Word (DOCX)',
+        category: 'pdf',
+        label: 'PDF Grande → Word (com páginas / OCR)',
         accept: '.pdf',
-        hint: 'PDF (recomendado para muitas páginas)',
+        hint: 'PDF (recomendado para muitas páginas ou escaneados)',
         endpoint: '/convert/pdf-to-word',
         extra: 'pdf-to-word-large',
+    },
+    'compress-pdf': {
+        category: 'pdf',
+        label: '🗜️ Reduzir tamanho do PDF (comprimir)',
+        accept: '.pdf',
+        hint: 'PDF (reduz tamanho com alvos de 1 a 10 MB)',
+        endpoint: '/convert/compress-pdf',
+        extra: 'pdf-compress',
+    },
+    'merge-pdfs': {
+        category: 'pdf',
+        label: '📑 Juntar PDFs (Mesclar / Merge)',
+        accept: '.pdf',
+        hint: 'PDF (selecione 2 ou mais arquivos)',
+        endpoint: '/convert/merge-pdfs',
+        extra: 'pdf-merge',
+        multiple: true,
     },
     'pdf-to-image': {
         category: 'pdf',
@@ -65,23 +82,6 @@ const conversions = {
         hint: 'PDF (cada página vira PNG/JPG)',
         endpoint: '/convert/pdf-to-image',
         extra: 'pdf-to-image',
-    },
-    'merge-pdfs': {
-        category: 'pdf-tools',
-        label: 'Juntar PDFs (Merge)',
-        accept: '.pdf',
-        hint: 'PDF (selecione 2+ arquivos)',
-        endpoint: '/convert/merge-pdfs',
-        extra: 'pdf-merge',
-        multiple: true,
-    },
-    'compress-pdf': {
-        category: 'pdf-tools',
-        label: 'Reduzir tamanho do PDF (comprimir)',
-        accept: '.pdf',
-        hint: 'PDF (reduz para caber em 5/8/10 MB)',
-        endpoint: '/convert/compress-pdf',
-        extra: 'pdf-compress',
     },
     'image-to-pdf': {
         category: 'pdf',
@@ -152,6 +152,11 @@ const progressMsg = document.getElementById('progressMsg');
 const progressBar = document.getElementById('progressBar');
 
 // ── Populate conversion types based on category ────────────────
+const categoryAliases = {
+    'pdf-large': 'pdf',
+    'pdf-tools': 'pdf',
+};
+
 const categoryMap = {};
 for (const [key, def] of Object.entries(conversions)) {
     if (!categoryMap[def.category]) categoryMap[def.category] = [];
@@ -159,7 +164,8 @@ for (const [key, def] of Object.entries(conversions)) {
 }
 
 function updateConversionTypes() {
-    const cat = categorySelect.value;
+    const rawCat = categorySelect.value;
+    const cat = categoryAliases[rawCat] || rawCat;
     const items = categoryMap[cat] || [];
     conversionType.innerHTML = '';
     items.forEach(item => {
@@ -263,11 +269,12 @@ pdfEngineSelect.addEventListener('change', updateExtraOptions);
 fileInput.addEventListener('change', () => {
     const files = Array.from(fileInput.files || []);
     if (files.length === 1) {
-        fileName.textContent = files[0].name;
+        fileName.textContent = `${files[0].name} (${formatSize(files[0].size)})`;
         fileName.classList.remove('hidden');
         fileLabel.classList.add('hidden');
     } else if (files.length > 1) {
-        fileName.textContent = `${files.length} arquivos selecionados`;
+        const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+        fileName.textContent = `${files.length} arquivos selecionados (${formatSize(totalBytes)})`;
         fileName.classList.remove('hidden');
         fileLabel.classList.add('hidden');
     } else {
@@ -299,9 +306,10 @@ dropZone.addEventListener('drop', (e) => {
             dt.items.add(files[0]);
             fileInput.files = dt.files;
         }
+        const totalBytes = Array.from(fileInput.files || []).reduce((acc, f) => acc + f.size, 0);
         fileName.textContent = (fileInput.files.length === 1)
-            ? fileInput.files[0].name
-            : `${fileInput.files.length} arquivos selecionados`;
+            ? `${fileInput.files[0].name} (${formatSize(fileInput.files[0].size)})`
+            : `${fileInput.files.length} arquivos selecionados (${formatSize(totalBytes)})`;
         fileName.classList.remove('hidden');
         fileLabel.classList.add('hidden');
     }

@@ -27,7 +27,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Run as non-root
-RUN useradd -m -u 10001 appuser && chown -R appuser:appuser /app
+RUN useradd -m -u 10001 appuser && \
+    mkdir -p /tmp/file-converter-api && \
+    chown -R appuser:appuser /app /tmp/file-converter-api
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
@@ -36,5 +38,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # Expose the port the API will run on
 EXPOSE 3004
 
-# Run the application with uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3004", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]
+# Run the application with uvicorn (trust reverse proxy / Cloudflare forwarded headers)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3004", "--proxy-headers", "--forwarded-allow-ips", "*"]

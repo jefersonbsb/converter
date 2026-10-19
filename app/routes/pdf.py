@@ -802,19 +802,23 @@ def compress_pdf(
         validate_signature(input_path, ".pdf")
         original_size = input_path.stat().st_size
 
-        if original_size <= target_bytes:
-            # Already within the requested limit — return the original untouched.
-            background_tasks.add_task(cleanup_files, input_path)
+        _compress_pdf_to_target(input_path, output_path, target_bytes)
+        compressed_size = output_path.stat().st_size if output_path.exists() else original_size
+
+        background_tasks.add_task(cleanup_files, input_path, output_path)
+
+        if not output_path.exists() or compressed_size >= original_size:
+            # Arquivo já estava compacto ou não pôde ser reduzido; retorna o original sem perda
             return FileResponse(
                 path=str(input_path),
                 media_type="application/pdf",
                 filename=f"{Path(file.filename).stem}.pdf",
+                headers={
+                    "X-Original-Size": str(original_size),
+                    "X-Compressed-Size": str(original_size),
+                },
             )
 
-        _compress_pdf_to_target(input_path, output_path, target_bytes)
-        compressed_size = output_path.stat().st_size
-
-        background_tasks.add_task(cleanup_files, input_path, output_path)
         return FileResponse(
             path=str(output_path),
             media_type="application/pdf",

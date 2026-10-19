@@ -156,14 +156,37 @@ def _resolve_libreoffice_executable() -> str:
     )
 
 
-def libre_convert(input_path: Path, output_ext: str, timeout: int = 120) -> Path:
+def prune_old_temp_files(max_age_seconds: int = 3600) -> None:
+    """Remove orphaned temporary files older than max_age_seconds."""
+    now = time.time()
+    try:
+        if not TEMP_DIR.exists():
+            return
+        for p in TEMP_DIR.iterdir():
+            try:
+                if p.is_file() and (now - p.stat().st_mtime) > max_age_seconds:
+                    p.unlink(missing_ok=True)
+                elif p.is_dir() and (now - p.stat().st_mtime) > max_age_seconds:
+                    shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def libre_convert(input_path: Path, output_ext: str, timeout: int = 85) -> Path:
     """
     Use LibreOffice headless to convert a file.
     Returns the path to the output file.
     """
     exe = _resolve_libreoffice_executable()
+    profile_dir = TEMP_DIR / f"lo_profile_{uuid.uuid4().hex}"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    profile_uri = profile_dir.as_uri()
+
     args = [
         exe,
+        f"-env:UserInstallation={profile_uri}",
         "--headless",
         "--norestore",
         "--nolockcheck",
@@ -177,9 +200,9 @@ def libre_convert(input_path: Path, output_ext: str, timeout: int = 120) -> Path
     ]
 
     env = os.environ.copy()
-    env.setdefault("HOME", str(TEMP_DIR))
+    env.setdefault("HOME", str(profile_dir))
     env.setdefault("TMPDIR", str(TEMP_DIR))
-    env.setdefault("USERPROFILE", str(TEMP_DIR))
+    env.setdefault("USERPROFILE", str(profile_dir))
 
     try:
         result = subprocess.run(
@@ -194,6 +217,11 @@ def libre_convert(input_path: Path, output_ext: str, timeout: int = 120) -> Path
             500,
             f"LibreOffice não encontrado no servidor ({exc}). Instale o LibreOffice e garanta que o executável esteja no PATH.",
         )
+    except subprocess.TimeoutExpired:
+        logger.error("LibreOffice conversion timed out after %ds", timeout)
+        raise HTTPException(504, "Tempo limite excedido na conversão do arquivo.")
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
     if result.returncode != 0:
         logger.error("LibreOffice conversion failed: %s", result.stderr.strip())
@@ -218,6 +246,7 @@ _JOBS: dict[str, dict] = {}
 
 
 def _cleanup_old_jobs(max_age_seconds: int = 3600) -> None:
+    prune_old_temp_files(max_age_seconds)
     now = time.time()
     with _JOB_LOCK:
         expired = [

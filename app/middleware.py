@@ -11,10 +11,17 @@ from app.utils import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 
 
 def _client_ip(request: Request) -> str:
-    # Behind the nginx reverse proxy we trust the first X-Forwarded-For hop.
+    # 1. Cloudflare real visitor IP
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
+
+    # 2. Behind nginx / reverse proxy we trust the first X-Forwarded-For hop.
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()
+
+    # 3. Direct connection
     return request.client.host if request.client else "unknown"
 
 

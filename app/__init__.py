@@ -1,8 +1,9 @@
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.middleware import RateLimitMiddleware, UploadSizeLimitMiddleware
@@ -34,5 +35,14 @@ def create_app() -> FastAPI:
     src_dir = Path(__file__).resolve().parents[1] / "src"
     if src_dir.exists():
         app.mount("/src", StaticFiles(directory=str(src_dir)), name="src")
+
+    @app.exception_handler(404)
+    async def custom_404_handler(request: Request, exc):
+        accept = request.headers.get("accept", "")
+        if "text/html" in accept and not request.url.path.startswith(("/convert", "/jobs")):
+            page_404 = src_dir / "pages" / "404.html"
+            if page_404.exists():
+                return FileResponse(str(page_404), status_code=404, media_type="text/html")
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
     return app
