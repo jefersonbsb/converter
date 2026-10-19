@@ -75,6 +75,14 @@ const conversions = {
         extra: 'pdf-merge',
         multiple: true,
     },
+    'compress-pdf': {
+        category: 'pdf-tools',
+        label: 'Reduzir tamanho do PDF (comprimir)',
+        accept: '.pdf',
+        hint: 'PDF (reduz para caber em 5/8/10 MB)',
+        endpoint: '/convert/compress-pdf',
+        extra: 'pdf-compress',
+    },
     'image-to-pdf': {
         category: 'pdf',
         label: 'Imagem → PDF',
@@ -136,6 +144,8 @@ const pdfEngineSelect = document.getElementById('pdfEngineSelect');
 const pdfRangeWrap = document.getElementById('pdfRangeWrap');
 const startPageInput = document.getElementById('startPageInput');
 const endPageInput = document.getElementById('endPageInput');
+const pdfCompressWrap = document.getElementById('pdfCompressWrap');
+const compressTargetSelect = document.getElementById('compressTargetSelect');
 const progressWrap = document.getElementById('progressWrap');
 const progressText = document.getElementById('progressText');
 const progressMsg = document.getElementById('progressMsg');
@@ -179,6 +189,7 @@ function updateFileAccept() {
 function updateExtraOptions() {
     const key = conversionType.value;
     const def = conversions[key];
+    pdfCompressWrap.classList.add('hidden');
     if (def && def.extra === 'pdf-to-image') {
         extraOptions.classList.remove('hidden');
         imageFormatSelect.parentElement.classList.remove('hidden');
@@ -223,6 +234,15 @@ function updateExtraOptions() {
         }
     } else if (def && def.extra === 'pdf-merge') {
         extraOptions.classList.add('hidden');
+    } else if (def && def.extra === 'pdf-compress') {
+        extraOptions.classList.remove('hidden');
+        imageFormatSelect.parentElement.classList.add('hidden');
+        dpiInput.parentElement.classList.add('hidden');
+        ocrToggle.classList.add('hidden');
+        ocrLangWrap.classList.add('hidden');
+        pdfEngineWrap.classList.add('hidden');
+        pdfRangeWrap.classList.add('hidden');
+        pdfCompressWrap.classList.remove('hidden');
     } else {
         extraOptions.classList.add('hidden');
     }
@@ -328,6 +348,8 @@ form.addEventListener('submit', async (e) => {
             params.set('ocr_lang', ocrLangInput.value || 'por');
             params.set('ocr_dpi', dpiInput.value || '200');
         }
+    } else if (def.extra === 'pdf-compress') {
+        params.set('target', compressTargetSelect.value || '10');
     }
 
     const qs = params.toString();
@@ -473,7 +495,11 @@ form.addEventListener('submit', async (e) => {
         a.remove();
         URL.revokeObjectURL(a.href);
 
-        showStatus('✅ Conversão concluída! Download iniciado.', 'green');
+        if (def.extra === 'pdf-compress') {
+            showStatus(`✅ PDF comprimido: ${formatSize(selectedFiles[0].size)} → ${formatSize(blob.size)}. Download iniciado.`, 'green');
+        } else {
+            showStatus('✅ Conversão concluída! Download iniciado.', 'green');
+        }
     } catch (err) {
         showStatus(`❌ ${err.message}`, 'red');
     } finally {
@@ -505,6 +531,20 @@ function setProgressMessage(msg) {
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function formatSize(bytes) {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    let value = n;
+    while (value >= 1024 && i < units.length - 1) {
+        value /= 1024;
+        i += 1;
+    }
+    const digits = value >= 100 ? 0 : (value >= 10 ? 1 : 2);
+    return `${value.toFixed(digits)} ${units[i]}`;
 }
 
 function downloadBlob(blob, originalName, contentDisposition) {

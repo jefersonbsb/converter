@@ -1,3 +1,5 @@
+import os
+import shutil
 import zipfile
 import traceback
 import threading
@@ -676,3 +678,141 @@ async def convert_image_to_pdf(
     except Exception as exc:
         cleanup_files(input_path, output_path)
         raise HTTPException(500, detail=f"Conversion failed: {exc}")
+
+
+# ── PDF → Compressed PDF ─────────────────────────────────────────────────
+
+
+# (quality, dpi_threshold, dpi_target) — ordered from mildest to most aggressive.
+_COMPRESS_STEPS = [
+    (85, None, 0),
+    (75, 300, 150),
+    (65, 200, 150),
+    (55, 150, 110),
+    (45, 150, 96),
+    (40, 110, 72),
+    (30, 110, 72),
+    (25, 96, 72),
+    (20, 96, 72),
+]
+
+
+def _compress_pdf_to_target(input_path: Path, output_path: Path, target_bytes: int) -> int:
+    """Reduce a PDF's size until it fits within ``target_bytes``.
+
+    Uses progressively more aggressive strategies:
+      1. lossless re-save (garbage collection, object streams, font subsetting);
+      2. image recompression + downsampling (requires PyMuPDF >= 1.26.1).
+
+    Always leaves a valid PDF at ``output_path`` and returns its size in bytes.
+    """
+    import fitz  # PyMuPDF
+
+    def save_doc(doc, path: Path) -> None:
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            doc.save(str(tmp), garbage=4, deflate=1, use_objstms=True)
+            os.replace(str(tmp), str(path))
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+    def rewrite(doc, quality: int, dpi_threshold, dpi_target: int) -> None:
+        try:
+            doc.subset_fonts()
+        except Exception:
+            pass
+        if dpi_threshold:
+            doc.rewrite_images(
+                dpi_threshold=dpi_threshold,
+                dpi_target=dpi_target,
+                quality=quality,
+            )
+        else:
+            doc.rewrite_images(quality=quality)
+
+    def fits() -> bool:
+        return output_path.exists() and output_path.stat().st_size <= target_bytes
+
+    # Strategy 1: lossless re-save.
+    doc = fitz.open(str(input_path))
+    try:
+        save_doc(doc, output_path)
+    finally:
+        doc.close()
+    if fits():
+        return output_path.stat().st_size
+
+    # Strategy 2: progressive image recompression.
+    if hasattr(fitz.Document, "rewrite_images"):
+        for quality, dpi_threshold, dpi_target in _COMPRESS_STEPS:
+            doc = fitz.open(str(input_path))
+            try:
+                rewrite(doc, quality, dpi_threshold, dpi_target)
+                save_doc(doc, output_path)
+            except Exception:
+                continue
+            finally:
+                doc.close()
+            if fits():
+                return output_path.stat().st_size
+
+    # Guarantee a valid output even if every compression step failed.
+    if not output_path.exists():
+        shutil.copy(str(input_path), str(output_path))
+    return output_path.stat().st_size
+
+
+@router.post("/compress-pdf")
+async def compress_pdf(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    target: float = Query(10, description="Tamanho máximo desejado em MB (ex.: 5, 8, 10)"),
+):
+    validate_ext(file.filename, {".pdf"})
+
+    try:
+        target_mb = float(target)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Parâmetro 'target' inválido. Use um número em MB.")
+
+    target_mb = max(0.1, min(target_mb, 100))
+    target_bytes = int(target_mb * 1024 * 1024)
+
+    input_path = unique_path(".pdf")
+    output_path = unique_path(".pdf")
+    try:
+        await save_upload_file(file, input_path)
+        original_size = input_path.stat().st_size
+
+        if original_size <= target_bytes:
+            # Already within the requested limit — return the original untouched.
+            background_tasks.add_task(cleanup_files, input_path)
+            return FileResponse(
+                path=str(input_path),
+                media_type="application/pdf",
+                filename=f"{Path(file.filename).stem}.pdf",
+            )
+
+        _compress_pdf_to_target(input_path, output_path, target_bytes)
+        compressed_size = output_path.stat().st_size
+
+        background_tasks.add_task(cleanup_files, input_path, output_path)
+        return FileResponse(
+            path=str(output_path),
+            media_type="application/pdf",
+            filename=f"{Path(file.filename).stem}-comprimido.pdf",
+            headers={
+                "X-Original-Size": str(original_size),
+                "X-Compressed-Size": str(compressed_size),
+            },
+        )
+    except HTTPException:
+        cleanup_files(input_path, output_path)
+        raise
+    except Exception as exc:
+        cleanup_files(input_path, output_path)
+        raise HTTPException(500, detail=f"Compression failed: {exc}")

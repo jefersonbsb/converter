@@ -60,6 +60,9 @@ Todos os endpoints recebem `multipart/form-data` com o campo `file`.
     - `fmt` (padrão `png`): `png` ou `jpg`
     - `dpi` (padrão `150`)
 - `POST /convert/image-to-pdf` → JPG/JPEG/PNG para PDF
+- `POST /convert/compress-pdf` → reduz o tamanho de um PDF (comprime para caber em um limite de tamanho)
+  - Query params:
+    - `target` (float, padrão `10`): tamanho máximo desejado em MB (ex.: `5`, `8`, `10`). A compressão é progressiva e tenta encaixar o arquivo dentro do limite sem degradar mais do que o necessário.
 
 ### Jobs
 
@@ -116,6 +119,12 @@ Word → PDF:
 
 ```bash
 curl -F "file=@arquivo.docx" http://localhost:3004/convert/word-to-pdf --output saida.pdf
+```
+
+Comprimir PDF (reduzir para caber em até 5 MB):
+
+```bash
+curl -F "file=@arquivo.pdf" "http://localhost:3004/convert/compress-pdf?target=5" --output comprimido.pdf
 ```
 
 ## Dependências de conversão
