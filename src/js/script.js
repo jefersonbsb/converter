@@ -395,20 +395,32 @@ form.addEventListener('submit', async (e) => {
     }
 
     try {
-        if (def.extra === 'pdf-to-word' || def.extra === 'pdf-to-word-large') {
-            setProgressVisible(true);
-            setProgress(0);
+        const isJobBased = (def.extra === 'pdf-to-word' || def.extra === 'pdf-to-word-large' || def.extra === 'pdf-compress');
 
-            const jobUrl = apiBase + '/convert/pdf-to-word-job' + (qs ? ('?' + qs) : '');
-            const jobRes = await fetch(jobUrl, { method: 'POST', body: formData });
+        if (isJobBased) {
+            setProgressVisible(true);
+            setProgress(3);
+            setProgressMessage('Enviando arquivo para o servidor…');
+
+            const jobEndpoint = (def.extra === 'pdf-compress')
+                ? '/convert/compress-pdf-job'
+                : '/convert/pdf-to-word-job';
+
+            const jobUrl = apiBase + jobEndpoint + (qs ? ('?' + qs) : '');
+            let jobRes;
+            try {
+                jobRes = await fetch(jobUrl, { method: 'POST', body: formData });
+            } catch (netErr) {
+                throw new Error('Falha de rede ao conectar com o servidor. Verifique sua conexão.');
+            }
 
             if (!jobRes.ok) {
-                let msg = `Erro ${jobRes.status}`;
+                let detail = '';
                 try {
                     const err = await jobRes.json();
-                    msg = err.detail || msg;
+                    detail = err.detail || '';
                 } catch { }
-                throw new Error(msg);
+                throw new Error(formatErrorMessage(jobRes.status, detail));
             }
 
             const job = await jobRes.json();
@@ -419,47 +431,82 @@ form.addEventListener('submit', async (e) => {
             while (true) {
                 const st = await fetch(statusUrl, { method: 'GET' });
                 if (!st.ok) {
-                    throw new Error(`Erro ${st.status}`);
+                    throw new Error(formatErrorMessage(st.status));
                 }
                 const data = await st.json();
                 setProgress(Number(data.progress || 0));
-                setProgressMessage(data.message || '');
+                setProgressMessage(data.message || 'Processando documento…');
                 if (data.status === 'done') break;
-                if (data.status === 'error') throw new Error(data.message || 'Falha na conversão.');
+                if (data.status === 'error') {
+                    throw new Error(data.message || 'Falha durante o processamento do arquivo.');
+                }
                 await sleep(500);
             }
 
+            setProgress(96);
+            setProgressMessage('Gerando download do arquivo final…');
+
             const res = await fetch(downloadUrl, { method: 'GET' });
             if (!res.ok) {
-                let msg = `Erro ${res.status}`;
-                try {
-                    const err = await res.json();
-                    msg = err.detail || msg;
-                } catch { }
-                throw new Error(msg);
+                throw new Error(formatErrorMessage(res.status));
             }
 
             const blob = await res.blob();
             downloadBlob(blob, selectedFiles[0].name, res.headers.get('Content-Disposition') || '');
-            showStatus('✅ Conversão concluída! Download iniciado.', 'green');
+            setProgress(100);
+
+            if (def.extra === 'pdf-compress') {
+                const origSize = selectedFiles[0].size;
+                const newSize = blob.size;
+                if (newSize < origSize) {
+                    const savedPct = Math.round((1 - (newSize / origSize)) * 100);
+                    showStatus(`PDF comprimido com sucesso: de ${formatSize(origSize)} para ${formatSize(newSize)} (${savedPct}% de redução). Download iniciado.`, 'green');
+                } else {
+                    showStatus(`O PDF já se encontrava com tamanho otimizado (${formatSize(origSize)}). Download iniciado.`, 'green');
+                }
+            } else {
+                showStatus('Conversão concluída com sucesso! Download iniciado.', 'green');
+            }
             return;
         }
 
-        const res = await fetch(apiBase + url, { method: 'POST', body: formData });
+        setProgressVisible(true);
+        setProgress(15);
+        setProgressMessage('Enviando documento e processando…');
+
+        let simProgress = 15;
+        const progressTimer = setInterval(() => {
+            if (simProgress < 88) {
+                simProgress += Math.min(8, Math.max(2, Math.floor((88 - simProgress) / 5)));
+                setProgress(simProgress);
+            }
+        }, 500);
+
+        let res;
+        try {
+            res = await fetch(apiBase + url, { method: 'POST', body: formData });
+        } catch (netErr) {
+            throw new Error('Falha de rede ao conectar com o servidor.');
+        } finally {
+            clearInterval(progressTimer);
+        }
 
         if (!res.ok) {
-            let msg = `Erro ${res.status}`;
+            let detail = '';
             try {
                 const err = await res.json();
-                msg = err.detail || msg;
+                detail = err.detail || '';
             } catch {
                 try {
                     const text = await res.text();
-                    if (text) msg = text.slice(0, 200);
+                    if (text) detail = text.slice(0, 200);
                 } catch { }
             }
-            throw new Error(msg);
+            throw new Error(formatErrorMessage(res.status, detail));
         }
+
+        setProgress(95);
+        setProgressMessage('Finalizando download…');
 
         // Trigger automatic download
         const blob = await res.blob();
@@ -512,16 +559,13 @@ form.addEventListener('submit', async (e) => {
         a.remove();
         URL.revokeObjectURL(a.href);
 
-        if (def.extra === 'pdf-compress') {
-            showStatus(`✅ PDF comprimido: ${formatSize(selectedFiles[0].size)} → ${formatSize(blob.size)}. Download iniciado.`, 'green');
-        } else {
-            showStatus('✅ Conversão concluída! Download iniciado.', 'green');
-        }
+        setProgress(100);
+        showStatus('Conversão concluída com sucesso! Download iniciado.', 'green');
     } catch (err) {
-        showStatus(`❌ ${err.message}`, 'red');
+        showStatus(err.message, 'red');
     } finally {
         setLoading(false);
-        setProgressVisible(false);
+        setTimeout(() => setProgressVisible(false), 1800);
     }
 });
 
@@ -615,12 +659,65 @@ function downloadBlob(blob, originalName, contentDisposition) {
     URL.revokeObjectURL(a.href);
 }
 
+function formatErrorMessage(status, rawMessage) {
+    if (status === 524) {
+        return 'Tempo limite da Cloudflare esgotado (Erro 524). O processamento levou mais de 100 segundos. O novo modo com barra de progresso foi ativado para evitar essa falha.';
+    }
+    if (status === 504) {
+        return 'Tempo limite do servidor esgotado (Erro 504). O arquivo é muito extenso para processamento síncrono.';
+    }
+    if (status === 413) {
+        return 'Arquivo muito grande (Erro 413). O limite configurado no servidor é de 50 MB.';
+    }
+    if (status === 429) {
+        return 'Muitas requisições enviadas em sequência (Erro 429). Aguarde alguns instantes e tente novamente.';
+    }
+    if (status === 502 || status === 503) {
+        return `Servidor temporariamente indisponível (Erro ${status}). O serviço pode estar reiniciando na VPS.`;
+    }
+    if (rawMessage && typeof rawMessage === 'string') {
+        const trimmed = rawMessage.trim();
+        if (!trimmed.includes('<html') && !trimmed.includes('<!DOCTYPE') && !trimmed.startsWith('Erro ')) {
+            return trimmed;
+        }
+    }
+    return status ? `Falha no processamento (Erro HTTP ${status}). Verifique o arquivo e tente novamente.` : 'Falha na conexão com o servidor. Verifique sua rede.';
+}
+
+function escapeHtml(str) {
+    return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 function showStatus(msg, type) {
-    statusMessage.textContent = msg;
-    statusMessage.className = `text-sm text-center rounded-lg p-3 ${type === 'red'
-        ? 'bg-red-50 text-red-700 border border-red-200'
-        : 'bg-green-50 text-green-700 border border-green-200'
-        }`;
+    const cleanMsg = String(msg || '').replace(/^[\u274c\u2705]\s*/, '').trim();
+    if (type === 'red') {
+        statusMessage.className = 'text-sm rounded-xl p-4 bg-red-50 text-red-800 border border-red-200 flex items-start gap-3 shadow-sm';
+        statusMessage.innerHTML = `
+            <svg class="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+            </svg>
+            <div class="space-y-0.5 text-left">
+                <p class="font-semibold text-red-900">Atenção</p>
+                <p class="text-xs text-red-700 leading-relaxed">${escapeHtml(cleanMsg)}</p>
+            </div>
+        `;
+    } else {
+        statusMessage.className = 'text-sm rounded-xl p-4 bg-emerald-50 text-emerald-800 border border-emerald-200 flex items-start gap-3 shadow-sm';
+        statusMessage.innerHTML = `
+            <svg class="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <div class="space-y-0.5 text-left">
+                <p class="font-semibold text-emerald-900">Sucesso!</p>
+                <p class="text-xs text-emerald-700 leading-relaxed">${escapeHtml(cleanMsg)}</p>
+            </div>
+        `;
+    }
     statusMessage.classList.remove('hidden');
 }
 

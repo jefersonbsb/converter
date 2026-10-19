@@ -696,30 +696,26 @@ def convert_image_to_pdf(
 # ── PDF → Compressed PDF ─────────────────────────────────────────────────
 
 
-# (quality, dpi_threshold, dpi_target) — ordered from mildest to most aggressive.
-_COMPRESS_STEPS = [
-    (85, None, 0),
-    (75, 300, 150),
-    (65, 200, 150),
-    (55, 150, 110),
-    (45, 150, 96),
-    (40, 110, 72),
-    (30, 110, 72),
-    (25, 96, 72),
-    (20, 96, 72),
-]
-
-
-def _compress_pdf_to_target(input_path: Path, output_path: Path, target_bytes: int) -> int:
+def _compress_pdf_to_target(
+    input_path: Path,
+    output_path: Path,
+    target_bytes: int,
+    progress_cb=None,
+) -> int:
     """Reduce a PDF's size until it fits within ``target_bytes``.
 
-    Uses progressively more aggressive strategies:
-      1. lossless re-save (garbage collection, object streams, font subsetting);
-      2. image recompression + downsampling (requires PyMuPDF >= 1.26.1).
-
-    Always leaves a valid PDF at ``output_path`` and returns its size in bytes.
+    Uses smart progressive strategies with live progress callbacks:
+      1. Lossless re-save (garbage collection, object streams, font subsetting);
+      2. Adaptive image recompression based on target ratio to avoid slow multi-pass loops.
     """
     import fitz  # PyMuPDF
+
+    def cb(pct: int, msg: str = "") -> None:
+        if progress_cb:
+            try:
+                progress_cb(pct, msg)
+            except Exception:
+                pass
 
     def save_doc(doc, path: Path) -> None:
         tmp = path.with_name(path.name + ".tmp")
@@ -750,18 +746,45 @@ def _compress_pdf_to_target(input_path: Path, output_path: Path, target_bytes: i
     def fits() -> bool:
         return output_path.exists() and output_path.stat().st_size <= target_bytes
 
-    # Strategy 1: lossless re-save.
+    original_size = input_path.stat().st_size
+    ratio = target_bytes / max(1, original_size)
+
+    # Strategy 1: lossless re-save + font subsetting
+    cb(20, "Otimizando objetos e fontes do PDF...")
     doc = fitz.open(str(input_path))
     try:
+        try:
+            doc.subset_fonts()
+        except Exception:
+            pass
         save_doc(doc, output_path)
     finally:
         doc.close()
+
     if fits():
+        cb(100, "Concluído!")
         return output_path.stat().st_size
 
-    # Strategy 2: progressive image recompression.
+    # Strategy 2: targeted image recompression (at most 2 passes instead of 9)
     if hasattr(fitz.Document, "rewrite_images"):
-        for quality, dpi_threshold, dpi_target in _COMPRESS_STEPS:
+        if ratio >= 0.70:
+            candidates = [
+                (70, 200, 140, "Otimizando imagens e gráficos (qualidade alta)...", 50),
+                (50, 150, 100, "Comprimindo imagens para atingir o tamanho...", 80),
+            ]
+        elif ratio >= 0.35:
+            candidates = [
+                (55, 150, 96, "Otimizando imagens e ajustando resolução...", 50),
+                (35, 110, 72, "Aplicando compressão profunda...", 80),
+            ]
+        else:
+            candidates = [
+                (35, 110, 72, "Reduzindo resolução para tamanho mínimo...", 50),
+                (20, 96, 72, "Aplicando compressão máxima...", 80),
+            ]
+
+        for quality, dpi_threshold, dpi_target, step_msg, step_pct in candidates:
+            cb(step_pct, step_msg)
             doc = fitz.open(str(input_path))
             try:
                 rewrite(doc, quality, dpi_threshold, dpi_target)
@@ -771,12 +794,77 @@ def _compress_pdf_to_target(input_path: Path, output_path: Path, target_bytes: i
             finally:
                 doc.close()
             if fits():
+                cb(100, "Concluído!")
                 return output_path.stat().st_size
 
-    # Guarantee a valid output even if every compression step failed.
+    # Guarantee a valid output even if compression steps failed.
     if not output_path.exists():
         shutil.copy(str(input_path), str(output_path))
+    cb(100, "Concluído!")
     return output_path.stat().st_size
+
+
+@router.post("/compress-pdf-job")
+def compress_pdf_job(
+    file: UploadFile = File(...),
+    target: float = Query(10, description="Tamanho máximo desejado em MB (ex.: 5, 8, 10)"),
+):
+    """Compress a PDF asynchronously with live progress reporting."""
+    validate_ext(file.filename, {".pdf"})
+
+    try:
+        target_mb = float(target)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Parâmetro 'target' inválido. Use um número em MB.")
+
+    target_mb = max(0.1, min(target_mb, 100))
+    target_bytes = int(target_mb * 1024 * 1024)
+
+    input_path = unique_path(".pdf")
+    output_path = unique_path(".pdf")
+
+    save_upload_file_sync(file, input_path)
+    validate_signature(input_path, ".pdf")
+
+    job_id = create_job()
+    attach_job_files(job_id, input_path=input_path)
+    update_job(job_id, progress=5, status="running", message="Arquivo recebido. Iniciando análise...")
+
+    download_name = f"{Path(file.filename).stem}-comprimido.pdf"
+    media_type = "application/pdf"
+
+    def worker() -> None:
+        try:
+            def progress_cb(pct: int, msg: str = ""):
+                update_job(job_id, progress=pct, message=msg)
+
+            original_size = input_path.stat().st_size
+            _compress_pdf_to_target(input_path, output_path, target_bytes, progress_cb=progress_cb)
+            compressed_size = output_path.stat().st_size if output_path.exists() else original_size
+
+            final_path = output_path
+            if not output_path.exists() or compressed_size >= original_size:
+                final_path = input_path
+
+            complete_job(
+                job_id,
+                output_path=final_path,
+                download_name=download_name,
+                media_type=media_type,
+            )
+            update_job(job_id, progress=100, status="done", message="Concluído com sucesso!")
+        except Exception as exc:
+            logger.exception("compress-pdf-job failed: %s", exc)
+            cleanup_files(output_path)
+            fail_job(job_id, message="Falha durante a compressão do arquivo.")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    return {
+        "job_id": job_id,
+        "status_url": f"/jobs/{job_id}",
+        "download_url": f"/jobs/{job_id}/download",
+    }
 
 
 @router.post("/compress-pdf")
@@ -785,6 +873,7 @@ def compress_pdf(
     file: UploadFile = File(...),
     target: float = Query(10, description="Tamanho máximo desejado em MB (ex.: 5, 8, 10)"),
 ):
+    """Synchronous compress route for API / cURL usage."""
     validate_ext(file.filename, {".pdf"})
 
     try:
@@ -808,7 +897,6 @@ def compress_pdf(
         background_tasks.add_task(cleanup_files, input_path, output_path)
 
         if not output_path.exists() or compressed_size >= original_size:
-            # Arquivo já estava compacto ou não pôde ser reduzido; retorna o original sem perda
             return FileResponse(
                 path=str(input_path),
                 media_type="application/pdf",
