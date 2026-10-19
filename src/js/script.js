@@ -317,6 +317,15 @@ form.addEventListener('submit', async (e) => {
         return;
     }
 
+    // Limite de upload (espelha MAX_UPLOAD_SIZE_MB configurado no servidor)
+    const MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024;
+    for (const f of selectedFiles) {
+        if (f.size > MAX_UPLOAD_SIZE_BYTES) {
+            showStatus(`O arquivo "${f.name}" excede o limite de 50 MB.`, 'red');
+            return;
+        }
+    }
+
     const key = conversionType.value;
     const def = conversions[key];
     if (!def) return;

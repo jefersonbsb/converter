@@ -4,7 +4,7 @@ from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks,
 from fastapi.responses import FileResponse
 from PIL import Image
 
-from app.utils import unique_path, cleanup_files, validate_ext, save_upload_file
+from app.utils import unique_path, cleanup_files, validate_ext, validate_signature, save_upload_file_sync, logger
 
 router = APIRouter(prefix="/convert", tags=["Image"])
 
@@ -34,7 +34,7 @@ MEDIA_MAP = {
 
 
 @router.post("/image")
-async def convert_image_format(
+def convert_image_format(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     to: str = Query("png", description="Target format: png, jpg, webp, bmp, tiff"),
@@ -47,7 +47,8 @@ async def convert_image_format(
     input_path = unique_path(ext)
     output_path = input_path.with_suffix(target_ext)
     try:
-        await save_upload_file(file, input_path)
+        save_upload_file_sync(file, input_path)
+        validate_signature(input_path, ext)
 
         image = Image.open(input_path)
         if image.mode in ("RGBA", "P") and target_ext in (".jpg", ".jpeg"):
@@ -62,8 +63,10 @@ async def convert_image_format(
             media_type=MEDIA_MAP.get(target_ext, "application/octet-stream"),
             filename=f"{Path(file.filename).stem}{target_ext}",
         )
+    except HTTPException:
+        cleanup_files(input_path, output_path)
+        raise
     except Exception as exc:
         cleanup_files(input_path, output_path)
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(500, f"Conversion failed: {exc}")
+        logger.exception("image conversion failed: %s", exc)
+        raise HTTPException(500, detail="Falha na conversão do arquivo.")

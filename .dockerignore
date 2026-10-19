@@ -3,3 +3,10 @@ __pycache__
 .env
 .git
 *.md
+venv/
+.venv/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+node_modules/

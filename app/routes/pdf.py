@@ -1,7 +1,6 @@
 import os
 import shutil
 import zipfile
-import traceback
 import threading
 from pathlib import Path
 from typing import List
@@ -13,12 +12,14 @@ from app.utils import (
     unique_path,
     cleanup_files,
     validate_ext,
-    save_upload_file,
+    validate_signature,
+    save_upload_file_sync,
     create_job,
     update_job,
     attach_job_files,
     complete_job,
     fail_job,
+    logger,
 )
 
 router = APIRouter(prefix="/convert", tags=["PDF"])
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/convert", tags=["PDF"])
 # ── PDF → Word ────────────────────────────────────────────────────────────
 
 @router.post("/pdf-to-word")
-async def convert_pdf_to_word(
+def convert_pdf_to_word(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     ocr: bool = Query(False, description="Ativa OCR quando o PDF não possui texto extraível"),
@@ -38,7 +39,8 @@ async def convert_pdf_to_word(
     input_path = unique_path(".pdf")
     output_path = input_path.with_suffix(".docx")
     try:
-        await save_upload_file(file, input_path)
+        save_upload_file_sync(file, input_path)
+        validate_signature(input_path, ".pdf")
 
         def docx_has_meaningful_text(path: Path) -> bool:
             try:
@@ -130,20 +132,20 @@ async def convert_pdf_to_word(
             try:
                 import pytesseract
             except Exception as exc:
-                raise HTTPException(
-                    500,
-                    f"OCR não está disponível no servidor (pytesseract). Erro: {exc}",
-                )
+                logger.exception("pytesseract unavailable for OCR")
+                raise HTTPException(500, "OCR não está disponível no servidor (pytesseract).")
 
             try:
                 import fitz
             except Exception as exc:
-                raise HTTPException(500, f"Falha ao carregar PyMuPDF para OCR: {exc}")
+                logger.exception("PyMuPDF unavailable for OCR")
+                raise HTTPException(500, "Falha ao carregar PyMuPDF para OCR.")
 
             try:
                 from PIL import Image
             except Exception as exc:
-                raise HTTPException(500, f"Falha ao carregar Pillow para OCR: {exc}")
+                logger.exception("Pillow unavailable for OCR")
+                raise HTTPException(500, "Falha ao carregar Pillow para OCR.")
 
             from docx import Document
 
@@ -235,13 +237,12 @@ async def convert_pdf_to_word(
         raise
     except Exception as exc:
         cleanup_files(input_path, output_path)
-        error_detail = f"Conversion failed: {exc}\n{traceback.format_exc()}"
-        print(f"[pdf-to-word] ERROR: {error_detail}")
-        raise HTTPException(500, detail=f"Conversion failed: {exc}")
+        logger.exception("pdf-to-word failed: %s", exc)
+        raise HTTPException(500, detail="Falha na conversão do arquivo.")
 
 
 @router.post("/pdf-to-word-job")
-async def convert_pdf_to_word_job(
+def convert_pdf_to_word_job(
     file: UploadFile = File(...),
     engine: str = Query("auto", description="auto, pdf2docx, text, ocr"),
     ocr: bool = Query(False, description="Ativa OCR quando o PDF não possui texto extraível"),
@@ -254,7 +255,8 @@ async def convert_pdf_to_word_job(
     input_path = unique_path(".pdf")
     output_path = input_path.with_suffix(".docx")
 
-    await save_upload_file(file, input_path)
+    save_upload_file_sync(file, input_path)
+    validate_signature(input_path, ".pdf")
 
     job_id = create_job()
     attach_job_files(job_id, input_path=input_path)
@@ -393,20 +395,20 @@ async def convert_pdf_to_word_job(
                 try:
                     import pytesseract
                 except Exception as exc:
-                    raise HTTPException(
-                        500,
-                        f"OCR não está disponível no servidor (pytesseract). Erro: {exc}",
-                    )
+                    logger.exception("pytesseract unavailable for OCR")
+                    raise HTTPException(500, "OCR não está disponível no servidor (pytesseract).")
 
                 try:
                     import fitz
                 except Exception as exc:
-                    raise HTTPException(500, f"Falha ao carregar PyMuPDF para OCR: {exc}")
+                    logger.exception("PyMuPDF unavailable for OCR")
+                    raise HTTPException(500, "Falha ao carregar PyMuPDF para OCR.")
 
                 try:
                     from PIL import Image
                 except Exception as exc:
-                    raise HTTPException(500, f"Falha ao carregar Pillow para OCR: {exc}")
+                    logger.exception("Pillow unavailable for OCR")
+                    raise HTTPException(500, "Falha ao carregar Pillow para OCR.")
 
                 from docx import Document
 
@@ -520,9 +522,14 @@ async def convert_pdf_to_word_job(
                 download_name=download_name,
                 media_type=media_type,
             )
+        except HTTPException as exc:
+            progress_stop.set()
+            fail_job(job_id, message=str(exc.detail))
+            cleanup_files(input_path, out_path)
         except Exception as exc:
             progress_stop.set()
-            fail_job(job_id, message=str(exc))
+            logger.exception("pdf-to-word-job failed: %s", exc)
+            fail_job(job_id, message="Falha na conversão do arquivo.")
             cleanup_files(input_path, out_path)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -538,7 +545,7 @@ async def convert_pdf_to_word_job(
 
 
 @router.post("/merge-pdfs")
-async def merge_pdfs(
+def merge_pdfs(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
 ):
@@ -551,7 +558,8 @@ async def merge_pdfs(
         for f in files:
             validate_ext(f.filename, {".pdf"})
             p = unique_path(".pdf")
-            await save_upload_file(f, p)
+            save_upload_file_sync(f, p)
+            validate_signature(p, ".pdf")
             input_paths.append(p)
 
         import fitz
@@ -576,14 +584,15 @@ async def merge_pdfs(
         raise
     except Exception as exc:
         cleanup_files(*input_paths, output_path)
-        raise HTTPException(500, detail=f"Conversion failed: {exc}")
+        logger.exception("merge-pdfs failed: %s", exc)
+        raise HTTPException(500, detail="Falha na conversão do arquivo.")
 
 
 # ── PDF → Image ───────────────────────────────────────────────────────────
 
 
 @router.post("/pdf-to-image")
-async def convert_pdf_to_image(
+def convert_pdf_to_image(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     fmt: str = Query("png", description="Output image format: png or jpg"),
@@ -597,7 +606,8 @@ async def convert_pdf_to_image(
     input_path = unique_path(".pdf")
 
     try:
-        await save_upload_file(file, input_path)
+        save_upload_file_sync(file, input_path)
+        validate_signature(input_path, ".pdf")
 
         import fitz  # PyMuPDF
         doc = fitz.open(input_path)
@@ -641,7 +651,8 @@ async def convert_pdf_to_image(
         raise
     except Exception as exc:
         cleanup_files(input_path)
-        raise HTTPException(500, detail=f"Conversion failed: {exc}")
+        logger.exception("pdf-to-image failed: %s", exc)
+        raise HTTPException(500, detail="Falha na conversão do arquivo.")
 
 
 # ── Image → PDF ───────────────────────────────────────────────────────────
@@ -650,7 +661,7 @@ from PIL import Image
 
 
 @router.post("/image-to-pdf")
-async def convert_image_to_pdf(
+def convert_image_to_pdf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
 ):
@@ -659,7 +670,8 @@ async def convert_image_to_pdf(
     input_path = unique_path(ext)
     output_path = input_path.with_suffix(".pdf")
     try:
-        await save_upload_file(file, input_path)
+        save_upload_file_sync(file, input_path)
+        validate_signature(input_path, ext)
 
         image = Image.open(input_path)
         if image.mode in ("RGBA", "P"):
@@ -677,7 +689,8 @@ async def convert_image_to_pdf(
         raise
     except Exception as exc:
         cleanup_files(input_path, output_path)
-        raise HTTPException(500, detail=f"Conversion failed: {exc}")
+        logger.exception("image-to-pdf failed: %s", exc)
+        raise HTTPException(500, detail="Falha na conversão do arquivo.")
 
 
 # ── PDF → Compressed PDF ─────────────────────────────────────────────────
@@ -767,7 +780,7 @@ def _compress_pdf_to_target(input_path: Path, output_path: Path, target_bytes: i
 
 
 @router.post("/compress-pdf")
-async def compress_pdf(
+def compress_pdf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     target: float = Query(10, description="Tamanho máximo desejado em MB (ex.: 5, 8, 10)"),
@@ -785,7 +798,8 @@ async def compress_pdf(
     input_path = unique_path(".pdf")
     output_path = unique_path(".pdf")
     try:
-        await save_upload_file(file, input_path)
+        save_upload_file_sync(file, input_path)
+        validate_signature(input_path, ".pdf")
         original_size = input_path.stat().st_size
 
         if original_size <= target_bytes:
@@ -815,4 +829,5 @@ async def compress_pdf(
         raise
     except Exception as exc:
         cleanup_files(input_path, output_path)
-        raise HTTPException(500, detail=f"Compression failed: {exc}")
+        logger.exception("compress-pdf failed: %s", exc)
+        raise HTTPException(500, detail="Falha na compressão do arquivo.")

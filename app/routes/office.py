@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 
-from app.utils import unique_path, cleanup_files, validate_ext, libre_convert, save_upload_file
+from app.utils import unique_path, cleanup_files, validate_ext, libre_convert, save_upload_file_sync, logger
 
 router = APIRouter(prefix="/convert", tags=["Office"])
 
@@ -14,41 +14,43 @@ PPT_EXTENSIONS = {".ppt", ".pptx"}
 
 
 @router.post("/office-to-pdf")
-async def convert_office_to_pdf(
+def convert_office_to_pdf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
 ):
     ext = validate_ext(file.filename, OFFICE_EXTENSIONS)
     input_path = unique_path(ext)
     try:
-        await save_upload_file(file, input_path)
+        save_upload_file_sync(file, input_path)
         output_path = libre_convert(input_path, ".pdf")
         background_tasks.add_task(cleanup_files, input_path, output_path)
         return _pdf_response(file.filename, output_path)
+    except HTTPException:
+        cleanup_files(input_path)
+        raise
     except Exception as exc:
         cleanup_files(input_path)
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(500, f"Conversion failed: {exc}")
+        logger.exception("office-to-pdf failed: %s", exc)
+        raise HTTPException(500, detail="Falha na conversão do arquivo.")
 
 
 @router.post("/word-to-pdf")
-async def convert_word_to_pdf(
+def convert_word_to_pdf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
 ):
-    return await convert_office_to_pdf(background_tasks, file)
+    return convert_office_to_pdf(background_tasks, file)
 
 
 @router.post("/word-to-html")
-async def convert_word_to_html(
+def convert_word_to_html(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
 ):
     ext = validate_ext(file.filename, WORD_EXTENSIONS)
     input_path = unique_path(ext)
     try:
-        await save_upload_file(file, input_path)
+        save_upload_file_sync(file, input_path)
         output_path = libre_convert(input_path, ".html")
         background_tasks.add_task(cleanup_files, input_path, output_path)
         return FileResponse(
@@ -56,22 +58,24 @@ async def convert_word_to_html(
             media_type="text/html",
             filename=f"{Path(file.filename).stem}.html",
         )
+    except HTTPException:
+        cleanup_files(input_path)
+        raise
     except Exception as exc:
         cleanup_files(input_path)
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(500, f"Conversion failed: {exc}")
+        logger.exception("word-to-html failed: %s", exc)
+        raise HTTPException(500, detail="Falha na conversão do arquivo.")
 
 
 @router.post("/excel-to-csv")
-async def convert_excel_to_csv(
+def convert_excel_to_csv(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
 ):
     ext = validate_ext(file.filename, EXCEL_EXTENSIONS)
     input_path = unique_path(ext)
     try:
-        await save_upload_file(file, input_path)
+        save_upload_file_sync(file, input_path)
         output_path = libre_convert(input_path, ".csv")
         background_tasks.add_task(cleanup_files, input_path, output_path)
         return FileResponse(
@@ -79,30 +83,34 @@ async def convert_excel_to_csv(
             media_type="text/csv",
             filename=f"{Path(file.filename).stem}.csv",
         )
+    except HTTPException:
+        cleanup_files(input_path)
+        raise
     except Exception as exc:
         cleanup_files(input_path)
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(500, f"Conversion failed: {exc}")
+        logger.exception("excel-to-csv failed: %s", exc)
+        raise HTTPException(500, detail="Falha na conversão do arquivo.")
 
 
 @router.post("/powerpoint-to-pdf")
-async def convert_powerpoint_to_pdf(
+def convert_powerpoint_to_pdf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
 ):
     ext = validate_ext(file.filename, PPT_EXTENSIONS)
     input_path = unique_path(ext)
     try:
-        await save_upload_file(file, input_path)
+        save_upload_file_sync(file, input_path)
         output_path = libre_convert(input_path, ".pdf")
         background_tasks.add_task(cleanup_files, input_path, output_path)
         return _pdf_response(file.filename, output_path)
+    except HTTPException:
+        cleanup_files(input_path)
+        raise
     except Exception as exc:
         cleanup_files(input_path)
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(500, f"Conversion failed: {exc}")
+        logger.exception("powerpoint-to-pdf failed: %s", exc)
+        raise HTTPException(500, detail="Falha na conversão do arquivo.")
 
 # ── Shared helpers ────────────────────────────────────────────────────────
 

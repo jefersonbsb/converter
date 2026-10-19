@@ -1,22 +1,28 @@
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app.middleware import RateLimitMiddleware, UploadSizeLimitMiddleware
 from app.routes import office, pdf, image, ebook, root
 
 
 def create_app() -> FastAPI:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+
     app = FastAPI(title="File Converter API", version="2.0.0", docs_url=None, redoc_url=None)
 
+    app.add_middleware(UploadSizeLimitMiddleware)
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["Content-Disposition"],
+        expose_headers=["Content-Disposition", "X-Original-Size", "X-Compressed-Size"],
     )
 
     app.include_router(root.router)

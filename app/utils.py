@@ -1,13 +1,29 @@
-import uuid
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
+
+logger = logging.getLogger("converter")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# Maximum accepted upload size, enforced both at the request level (Content-Length)
+# and while streaming the body to disk. Tune via the MAX_UPLOAD_SIZE_MB env var.
+MAX_UPLOAD_SIZE_MB = max(1, _env_int("MAX_UPLOAD_SIZE_MB", 50))
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
 
 TEMP_DIR = Path(tempfile.gettempdir()) / "file-converter-api"
@@ -40,14 +56,62 @@ def validate_ext(filename: str | None, allowed: set) -> str:
     return ext
 
 
-async def save_upload_file(upload_file: UploadFile, destination: Path, chunk_size: int = 1024 * 1024) -> None:
+def _read_head(path: Path, n: int) -> bytes:
+    try:
+        with path.open("rb") as f:
+            return f.read(n)
+    except OSError:
+        return b""
+
+
+def validate_signature(path: Path, ext: str) -> None:
+    """Reject files whose magic bytes do not match the declared extension.
+
+    Covers PDF and common raster formats. Office/EPUB/HTML files are validated
+    by the underlying conversion tooling instead and are not checked here.
+    """
+    head = _read_head(path, 16)
+    if ext == ".pdf":
+        ok = head.startswith(b"%PDF")
+    elif ext in (".jpg", ".jpeg"):
+        ok = head.startswith(b"\xff\xd8\xff")
+    elif ext == ".png":
+        ok = head.startswith(b"\x89PNG\r\n\x1a\n")
+    elif ext == ".webp":
+        ok = head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    elif ext == ".bmp":
+        ok = head.startswith(b"BM")
+    elif ext in (".tif", ".tiff"):
+        ok = head.startswith((b"II*\x00", b"MM\x00*"))
+    else:
+        return
+
+    if not ok:
+        cleanup_files(path)
+        raise HTTPException(400, "Arquivo inválido: o conteúdo não corresponde à extensão informada.")
+
+
+def save_upload_file_sync(upload_file: UploadFile, destination: Path, chunk_size: int = 1024 * 1024) -> None:
+    """Stream an upload to disk synchronously, enforcing the upload size limit.
+
+    Used by synchronous (CPU-bound) endpoints running in FastAPI's threadpool,
+    where ``upload_file.file`` is already a complete spooled file object.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("wb") as out:
-        while True:
-            chunk = await upload_file.read(chunk_size)
-            if not chunk:
-                break
-            out.write(chunk)
+    total = 0
+    try:
+        with destination.open("wb") as out:
+            while True:
+                chunk = upload_file.file.read(chunk_size)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_SIZE_BYTES:
+                    raise HTTPException(413, f"Arquivo excede o limite de {MAX_UPLOAD_SIZE_MB} MB.")
+                out.write(chunk)
+    except Exception:
+        cleanup_files(destination)
+        raise
 
 
 def _resolve_libreoffice_executable() -> str:
@@ -132,9 +196,8 @@ def libre_convert(input_path: Path, output_ext: str, timeout: int = 120) -> Path
         )
 
     if result.returncode != 0:
-        raise HTTPException(
-            500, f"LibreOffice conversion failed: {result.stderr.strip()}"
-        )
+        logger.error("LibreOffice conversion failed: %s", result.stderr.strip())
+        raise HTTPException(500, "Falha na conversão do arquivo (LibreOffice).")
 
     # LibreOffice saves output with the same stem as the input
     output_path = input_path.with_suffix(output_ext)
